@@ -1,0 +1,1624 @@
+import SwiftUI
+import Foundation
+
+// MARK: - Root View (The Router)
+struct ContentView: View {
+    @StateObject private var gameStateManager = GameStateManager()
+
+    var body: some View {
+        ZStack {
+            // This switch statement acts as the navigation router
+            switch gameStateManager.currentState {
+            case .mainMenu:
+                MainMenuView(gameStateManager: gameStateManager)
+            case .levelSelect:
+                LevelSelectView(gameStateManager: gameStateManager)
+            case .store:
+                StoreView(gameStateManager: gameStateManager)
+            case .profile:
+                ProfileView(gameStateManager: gameStateManager)
+            case .army:
+                ArmyView(gameStateManager: gameStateManager)
+            case .packOpening(let crate):
+                 PackOpeningView(gameStateManager: gameStateManager, crate: crate)
+            case .battle(let level):
+                BattleView(gameStateManager: gameStateManager, level: level)
+            case .postLevelVictory(let money, let stars):
+                PostLevelVictoryView(gameStateManager: gameStateManager, moneyGained: money, stars: stars)
+            }
+        }
+        .transition(.opacity.animation(.easeInOut(duration: 0.4)))
+    }
+}
+
+// MARK: - Custom Font Modifier
+struct MinecraftFont: ViewModifier {
+    var size: CGFloat
+    var color: Color = .white
+
+    func body(content: Content) -> some View {
+        content
+            .font(.custom("AmericanTypewriter-Bold", size: size))
+            .foregroundColor(color)
+            .shadow(color: .black, radius: 0, x: 1, y: 1)
+            .shadow(color: .black, radius: 0, x: -1, y: -1)
+            .shadow(color: .black, radius: 0, x: 1, y: -1)
+            .shadow(color: .black, radius: 0, x: -1, y: 1)
+    }
+}
+
+extension View {
+    func minecraftFont(size: CGFloat = 28, color: Color = .white) -> some View {
+        self.modifier(MinecraftFont(size: size, color: color))
+    }
+}
+
+// MARK: - Core Game Models
+struct CharacterInstance: Identifiable, Equatable {
+    let id = UUID()
+    let characterId: String
+    var level: Int = 1
+    var xp: Int = 0
+    
+    var base: GameCharacter {
+        GameDB.allCharacters[characterId] ?? GameCharacter(id: "error", name: "Error", baseAttack: 1, baseHealth: 1, attackGrowth: 0, healthGrowth: 0, sourceCrate: 0, recycleXpValue: 0)
+    }
+    
+    var name: String { base.name }
+    var maxXp: Int { 100 * level }
+    var attack: Int { base.baseAttack + (level - 1) * base.attackGrowth }
+    var health: Int { base.baseHealth + (level - 1) * base.healthGrowth }
+    
+    var canUpgrade: Bool { xp >= maxXp }
+}
+
+struct EnemyInstance: Identifiable {
+    let id: String
+    let levelId: Int
+    var base: GameCharacter { GameDB.allEnemies[id]! }
+    
+    var name: String { base.name }
+    
+    var health: Int {
+        let scalingFactor = 1.0 + (Double(levelId) * 0.08)
+        return Int(Double(base.baseHealth) * scalingFactor)
+    }
+    var attack: Int {
+        let scalingFactor = 1.0 + (Double(levelId) * 0.08)
+        return Int(Double(base.baseAttack) * scalingFactor)
+    }
+}
+
+struct GameCharacter: Identifiable {
+    let id: String
+    var name: String
+    var baseAttack: Int
+    var baseHealth: Int
+    var attackGrowth: Int
+    var healthGrowth: Int
+    var sourceCrate: Int
+    var recycleXpValue: Int
+}
+
+struct PlayerProfile {
+    var displayName: String = "Hero"
+    var bio: String = "Ready to save Paper World!"
+    var profileImageName: String = "default_profile_pic"
+    var mainCharacterInstanceId: UUID
+    var characterCollection: [CharacterInstance]
+    var currentLevelId: Int = 1
+    var paperMoney: Int = 500
+    var mainCharacter: CharacterInstance? {
+        characterCollection.first { $0.id == mainCharacterInstanceId }
+    }
+}
+
+enum LevelDifficulty: String {
+    case easy = "Easy"
+    case medium = "Medium"
+    case hard = "Hard"
+}
+
+struct Level: Identifiable {
+    let id: Int
+    var starRating: Int = 0
+    var enemyIds: [String]
+    var isUnlocked: Bool
+    var difficulty: LevelDifficulty
+    var platformAssetName: String
+}
+
+struct Crate: Identifiable {
+    var id: String { name }
+    var name: String
+    var imageName: String
+    var cost: Int
+    var tier: Int
+}
+
+struct DamageText: Identifiable {
+    let id = UUID()
+    let text: String
+    let color: Color
+    var isPlayerDamage: Bool
+}
+
+struct ShootingStar: Identifiable {
+    let id = UUID()
+    let startPoint: CGPoint
+    let endPoint: CGPoint
+    let duration: Double
+}
+
+// FIXED: The missing BattleResult enum has been added here.
+enum BattleResult {
+    case victory, defeat
+}
+
+// MARK: - Game Database
+struct GameDB {
+    static let allCharacters: [String: GameCharacter] = [
+        "character_starter": GameCharacter(id: "character_starter", name: "Piñata", baseAttack: 11, baseHealth: 75, attackGrowth: 2, healthGrowth: 9, sourceCrate: 1, recycleXpValue: 10),
+        "character1_crate1": GameCharacter(id: "character1_crate1", name: "Patch", baseAttack: 10, baseHealth: 80, attackGrowth: 2, healthGrowth: 10, sourceCrate: 1, recycleXpValue: 20),
+        "character2_crate1": GameCharacter(id: "character2_crate1", name: "Scrappy", baseAttack: 12, baseHealth: 70, attackGrowth: 3, healthGrowth: 8, sourceCrate: 1, recycleXpValue: 20),
+        "character3_crate1": GameCharacter(id: "character3_crate1", name: "Rusty", baseAttack: 8, baseHealth: 100, attackGrowth: 1, healthGrowth: 12, sourceCrate: 1, recycleXpValue: 20),
+        "character1_crate2": GameCharacter(id: "character1_crate2", name: "Sergeant Stitch", baseAttack: 15, baseHealth: 120, attackGrowth: 4, healthGrowth: 15, sourceCrate: 2, recycleXpValue: 50),
+        "character2_crate2": GameCharacter(id: "character2_crate2", name: "Major Mark", baseAttack: 18, baseHealth: 100, attackGrowth: 5, healthGrowth: 12, sourceCrate: 2, recycleXpValue: 50),
+        "character3_crate2": GameCharacter(id: "character3_crate2", name: "Captain Cardboard", baseAttack: 13, baseHealth: 150, attackGrowth: 3, healthGrowth: 18, sourceCrate: 2, recycleXpValue: 50),
+        "character4_crate2": GameCharacter(id: "character4_crate2", name: "The Enforcer", baseAttack: 20, baseHealth: 90, attackGrowth: 6, healthGrowth: 10, sourceCrate: 2, recycleXpValue: 50),
+        "character1_crate3": GameCharacter(id: "character1_crate3", name: "Lord Lamination", baseAttack: 25, baseHealth: 180, attackGrowth: 7, healthGrowth: 25, sourceCrate: 3, recycleXpValue: 150),
+        "character2_crate3": GameCharacter(id: "character2_crate3", name: "Sir Foldingham", baseAttack: 30, baseHealth: 150, attackGrowth: 9, healthGrowth: 20, sourceCrate: 3, recycleXpValue: 150),
+        "character3_crate3": GameCharacter(id: "character3_crate3", name: "The Pulp Fiend", baseAttack: 22, baseHealth: 220, attackGrowth: 6, healthGrowth: 30, sourceCrate: 3, recycleXpValue: 150),
+        "character4_crate3": GameCharacter(id: "character4_crate3", name: "Origami Overlord", baseAttack: 35, baseHealth: 140, attackGrowth: 10, healthGrowth: 18, sourceCrate: 3, recycleXpValue: 150),
+        "character5_crate3": GameCharacter(id: "character5_crate3", name: "King Cardboard", baseAttack: 28, baseHealth: 200, attackGrowth: 8, healthGrowth: 28, sourceCrate: 3, recycleXpValue: 150),
+    ]
+    static let allEnemies: [String: GameCharacter] = [
+        "enemy_1": GameCharacter(id: "enemy_1", name: "Grumpy Goblin", baseAttack: 8, baseHealth: 40, attackGrowth: 0, healthGrowth: 0, sourceCrate: 0, recycleXpValue: 0),
+        "enemy_2": GameCharacter(id: "enemy_2", name: "Angry Orc", baseAttack: 15, baseHealth: 60, attackGrowth: 0, healthGrowth: 0, sourceCrate: 0, recycleXpValue: 0),
+        "enemy_3": GameCharacter(id: "enemy_3", name: "Fierce Cyclops", baseAttack: 20, baseHealth: 80, attackGrowth: 0, healthGrowth: 0, sourceCrate: 0, recycleXpValue: 0),
+        "enemy_4": GameCharacter(id: "enemy_4", name: "Stone Golem", baseAttack: 25, baseHealth: 120, attackGrowth: 0, healthGrowth: 0, sourceCrate: 0, recycleXpValue: 0),
+        "enemy_5": GameCharacter(id: "enemy_5", name: "Paper Dragon", baseAttack: 30, baseHealth: 100, attackGrowth: 0, healthGrowth: 0, sourceCrate: 0, recycleXpValue: 0),
+        "boss_enemy": GameCharacter(id: "boss_enemy", name: "The Toaster King", baseAttack: 40, baseHealth: 200, attackGrowth: 0, healthGrowth: 0, sourceCrate: 0, recycleXpValue: 0)
+    ]
+}
+
+// MARK: - Game State Manager
+enum GameState: Equatable {
+    case mainMenu
+    case levelSelect
+    case store
+    case profile
+    case army
+    case packOpening(crate: Crate)
+    case battle(level: Level)
+    case postLevelVictory(moneyGained: Int, stars: Int)
+    
+    static func == (lhs: GameState, rhs: GameState) -> Bool {
+        switch (lhs, rhs) {
+        case (.mainMenu, .mainMenu),
+             (.levelSelect, .levelSelect),
+             (.store, .store),
+             (.profile, .profile),
+             (.army, .army):
+            return true
+        case (.packOpening(let a), .packOpening(let b)):
+            return a.id == b.id
+        case (.battle(let a), .battle(let b)):
+            return a.id == b.id
+        case (.postLevelVictory(let moneyA, let starsA), .postLevelVictory(let moneyB, let starsB)):
+            return moneyA == moneyB && starsA == starsB
+        default:
+            return false
+        }
+    }
+}
+
+class GameStateManager: ObservableObject {
+    @Published var navigationStack: [GameState] = [.mainMenu]
+    @Published var playerProfile: PlayerProfile
+    @Published var levels: [Level] = []
+    
+    @Published var hasShownUpgradeTutorial = false
+    @Published var hasShownCrateTutorial = false
+
+    var currentState: GameState {
+        navigationStack.last ?? .mainMenu
+    }
+    
+    var shouldShowUpgradeNotification: Bool {
+        return playerProfile.characterCollection.count > 1 && !hasShownUpgradeTutorial
+    }
+
+    var shouldShowCrateTutorial: Bool {
+        let cheapestCrateCost = 250
+        return playerProfile.paperMoney >= cheapestCrateCost && !hasShownCrateTutorial
+    }
+    
+    init() {
+        let initialCharacter = CharacterInstance(characterId: "character_starter")
+        self.playerProfile = PlayerProfile(mainCharacterInstanceId: initialCharacter.id, characterCollection: [initialCharacter])
+        self.levels = generateLevels()
+    }
+    
+    private func generateLevels() -> [Level] {
+        var generatedLevels: [Level] = []
+        let platformAssets = ["level_1", "level_2", "level_3"]
+        
+        for i in 1...50 {
+            var enemyIds: [String]
+            let difficulty: LevelDifficulty
+            
+            switch i {
+            case 1...10:
+                enemyIds = ["enemy_1"]
+                difficulty = .easy
+            case 11...24:
+                enemyIds = ["enemy_2"]
+                difficulty = .easy
+            case 25:
+                enemyIds = ["enemy_1", "enemy_2"]
+                difficulty = .medium
+            case 26...39:
+                enemyIds = ["enemy_3"]
+                difficulty = .medium
+            case 40:
+                enemyIds = ["enemy_3", "enemy_4"]
+                difficulty = .hard
+            case 41..<50:
+                enemyIds = ["boss_enemy", "enemy_5"]
+                difficulty = .hard
+            case 50:
+                enemyIds = ["boss_enemy", "enemy_4", "enemy_5"]
+                difficulty = .hard
+            default:
+                enemyIds = ["enemy_1"]
+                difficulty = .easy
+            }
+            
+            let isUnlocked = (i == 1)
+            let platform = platformAssets.randomElement() ?? "level_1"
+            generatedLevels.append(Level(id: i, starRating: 0, enemyIds: enemyIds, isUnlocked: isUnlocked, difficulty: difficulty, platformAssetName: platform))
+        }
+        return generatedLevels
+    }
+    
+    func navigateTo(_ state: GameState) {
+        if state == .army && shouldShowUpgradeNotification {
+            hasShownUpgradeTutorial = true
+        }
+        if state == .store && shouldShowCrateTutorial {
+            hasShownCrateTutorial = true
+        }
+        
+        guard currentState != state else { return }
+        navigationStack.append(state)
+    }
+
+    func goBack() {
+        if navigationStack.count > 1 {
+            _ = navigationStack.popLast()
+        }
+    }
+    
+    func returnToLevelSelect() {
+        navigationStack.removeAll {
+            switch $0 {
+            case .postLevelVictory, .battle:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+    
+    func completeLevel(id: Int, stars: Int) -> Int {
+        guard let index = levels.firstIndex(where: { $0.id == id }),
+              let primaryEnemyId = levels[index].enemyIds.first,
+              let enemy = GameDB.allEnemies[primaryEnemyId] else {
+            return 0
+        }
+        
+        let levelBonus = 20 * id
+        let enemyBonus = (enemy.baseHealth / 4) + (enemy.baseAttack * 2)
+        let starMultiplier = 1.0 + (Double(stars) - 1.0) * 0.25
+        let moneyGained = Int(Double(levelBonus + enemyBonus) * starMultiplier)
+
+        if stars > levels[index].starRating {
+            levels[index].starRating = stars
+        }
+        addXpToCharacter(instanceId: playerProfile.mainCharacterInstanceId, amount: 75)
+        playerProfile.paperMoney += moneyGained
+        
+        let nextLevelId = id + 1
+        if nextLevelId <= 50, let nextLevelIndex = levels.firstIndex(where: { $0.id == nextLevelId }) {
+            levels[nextLevelIndex].isUnlocked = true
+        }
+        
+        if id == playerProfile.currentLevelId {
+            playerProfile.currentLevelId = nextLevelId
+        }
+        
+        return moneyGained
+    }
+    
+    func addXpToCharacter(instanceId: UUID, amount: Int) {
+        if let charIndex = playerProfile.characterCollection.firstIndex(where: { $0.id == instanceId }) {
+            playerProfile.characterCollection[charIndex].xp += amount
+        }
+    }
+
+    func upgradeCost(for character: CharacterInstance) -> Int {
+        let baseCost = 100.0
+        let nextLevel = Double(character.level + 1)
+        
+        let rarityMultiplier: Double
+        switch character.base.sourceCrate {
+        case 1: rarityMultiplier = 1.0
+        case 2: rarityMultiplier = 2.5
+        case 3: rarityMultiplier = 5.0
+        default: rarityMultiplier = 1.0
+        }
+        
+        let finalCost = baseCost * pow(nextLevel, 1.5) * rarityMultiplier
+        return Int(finalCost)
+    }
+
+    func performUpgrade(for instanceId: UUID) {
+        guard let charIndex = playerProfile.characterCollection.firstIndex(where: { $0.id == instanceId }) else { return }
+        
+        while playerProfile.characterCollection[charIndex].canUpgrade {
+            let character = playerProfile.characterCollection[charIndex]
+            let cost = upgradeCost(for: character)
+            
+            guard playerProfile.paperMoney >= cost else { break }
+            
+            playerProfile.paperMoney -= cost
+            
+            let leftoverXp = character.xp - character.maxXp
+            playerProfile.characterCollection[charIndex].level += 1
+            playerProfile.characterCollection[charIndex].xp = leftoverXp
+        }
+    }
+}
+
+// MARK: - Helper Views
+struct PaperMoneyView: View {
+    let money: Int
+
+    var body: some View {
+        HStack {
+            Text("\(money)")
+                .minecraftFont(size: 24)
+            Image("paper_money").resizable().scaledToFit().frame(height: 70)
+        }
+        .padding(.horizontal, 15).padding(.vertical, 10)
+        .shadow(color: .black.opacity(0.3), radius: 5, x: 0, y: 5)
+    }
+}
+
+struct StarRatingView: View {
+    @Binding var rating: Int
+    var body: some View {
+        HStack { ForEach(0..<3) { i in
+            Image("gold_star").resizable().scaledToFit().frame(width: 30, height: 30)
+                .grayscale(i < rating ? 0.0 : 1.0).opacity(i < rating ? 1.0 : 0.4)
+                .scaleEffect(i < rating ? 1.0 : 0.8)
+        }}
+    }
+}
+
+struct CharacterView: View {
+    let characterAssetName: String
+    @Binding var isAnimating: Bool
+    var body: some View {
+        Image(characterAssetName).resizable().aspectRatio(contentMode: .fit).frame(width: 150)
+            .rotationEffect(.degrees(isAnimating ? -5 : 5)).offset(y: isAnimating ? -15 : 0)
+            .animation(Animation.easeInOut(duration: 2.5).repeatForever(autoreverses: true), value: isAnimating)
+    }
+}
+
+struct ShootingStarView: View {
+    let star: ShootingStar
+    @State private var isAnimating = false
+    var body: some View {
+        Capsule().fill(LinearGradient(gradient: Gradient(colors: [.white, .white.opacity(0)]), startPoint: .top, endPoint: .bottom))
+            .frame(width: 3, height: 150).rotationEffect(.degrees(225)).position(isAnimating ? star.endPoint : star.startPoint)
+            .onAppear { withAnimation(.linear(duration: star.duration)) { isAnimating = true } }
+    }
+}
+
+struct ShootingStarLayer: View {
+    @State private var stars: [ShootingStar] = []
+    let timer = Timer.publish(every: Double.random(in: 3.0...8.0), on: .main, in: .common).autoconnect()
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                ForEach(stars) { star in
+                    ShootingStarView(star: star).onAppear {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + star.duration) {
+                            stars.removeAll { $0.id == star.id }
+                        }
+                    }
+                }
+            }
+            .onReceive(timer) { _ in
+                let startX = CGFloat.random(in: 0...geometry.size.width)
+                let newStar = ShootingStar(
+                    startPoint: CGPoint(x: startX, y: 0),
+                    endPoint: CGPoint(x: startX - 300, y: 600),
+                    duration: Double.random(in: 0.5...1.25)
+                )
+                stars.append(newStar)
+            }
+        }
+    }
+}
+
+struct DamageTextView: View {
+    let item: DamageText
+    
+    @State private var yOffset: CGFloat = 0
+    @State private var opacity: Double = 1.0
+    
+    var body: some View {
+        Text(item.text)
+            .minecraftFont(size: 32, color: item.color)
+            .offset(y: yOffset)
+            .opacity(opacity)
+            .onAppear {
+                withAnimation(.easeIn(duration: 1.0)) {
+                    yOffset = -80
+                    opacity = 0
+                }
+            }
+    }
+}
+
+struct HealthBar: View {
+    let currentHealth: Int
+    let maxHealth: Int
+    
+    private var healthPercentage: Double { maxHealth > 0 ? Double(currentHealth) / Double(maxHealth) : 0 }
+    
+    private var barColor: Color {
+        if healthPercentage > 0.6 { return .green }
+        if healthPercentage > 0.3 { return .yellow }
+        return .red
+    }
+    
+    var body: some View {
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.5))
+            RoundedRectangle(cornerRadius: 8)
+                .fill(barColor)
+                .frame(width: 150 * healthPercentage)
+                .animation(.easeInOut, value: healthPercentage)
+        }.frame(width: 150, height: 20)
+         .overlay(Text("\(currentHealth)/\(maxHealth)").minecraftFont(size: 14))
+    }
+}
+
+struct AttackParticleEffect: View {
+    @State private var isAnimating = false
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<15) { _ in
+                Image("attack_particle")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: isAnimating ? 40 : 10, height: isAnimating ? 40 : 10)
+                    .offset(x: isAnimating ? (CGFloat.random(in: -1...1) * 60) : 0,
+                            y: isAnimating ? (CGFloat.random(in: -1...1) * 60) : 0)
+                    .opacity(isAnimating ? 0 : 1)
+                    .animation(Animation.easeOut(duration: 0.5).delay(Double.random(in: 0...0.1)), value: isAnimating)
+            }
+        }
+        .onAppear {
+            isAnimating = true
+        }
+    }
+}
+
+struct BottomBackButtonView: View {
+    let action: () -> Void
+
+    var body: some View {
+        VStack {
+            Spacer()
+            HStack {
+                Spacer()
+                Button(action: action) {
+                    Image("back_button")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 150)
+                }
+                Spacer()
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.bottom, 20)
+    }
+}
+
+struct DifficultyPill: View {
+    let difficulty: LevelDifficulty
+    
+    private var difficultyColor: Color {
+        switch difficulty {
+        case .easy: return .green
+        case .medium: return .yellow
+        case .hard: return .red
+        }
+    }
+    
+    var body: some View {
+        Text(difficulty.rawValue)
+            .minecraftFont(size: 16)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .background(difficultyColor)
+            .cornerRadius(20)
+            .foregroundColor(.black)
+    }
+}
+
+struct StatDisplay: View {
+    let character: Any
+    var isEnemy: Bool = false
+    
+    private var health: Int {
+        if let char = character as? CharacterInstance { return char.health }
+        if let char = character as? EnemyInstance { return char.health }
+        return 0
+    }
+    
+    private var attack: Int {
+        if let char = character as? CharacterInstance { return char.attack }
+        if let char = character as? EnemyInstance { return char.attack }
+        return 0
+    }
+    
+    var body: some View {
+        HStack(spacing: 4) {
+            if isEnemy { Spacer() }
+            Image(systemName: "heart.fill").foregroundColor(.red).font(.caption)
+            Text("\(health)").minecraftFont(size: 14)
+            Image(systemName: "flame.fill").foregroundColor(.orange).font(.caption)
+            Text("\(attack)").minecraftFont(size: 14)
+            if !isEnemy { Spacer() }
+        }
+        .padding(8)
+        .background(.black.opacity(0.6))
+        .cornerRadius(10)
+    }
+}
+
+struct StatPill: View {
+    let title: String
+    let value: String
+    var imageName: String? = nil
+    var systemImageName: String? = nil
+    
+    var body: some View {
+        VStack {
+            Text(value)
+                .minecraftFont(size: 24)
+            HStack {
+                if let imageName = imageName {
+                    Image(imageName).resizable().scaledToFit().frame(height: 22)
+                } else if let systemImageName = systemImageName {
+                    Image(systemName: systemImageName).font(.system(size: 20)).foregroundColor(.white)
+                }
+                Text(title)
+                    .minecraftFont(size: 16)
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity)
+        .background(Color.black.opacity(0.4))
+        .cornerRadius(10)
+    }
+}
+
+struct StatBar: View {
+    let label: String
+    let value: Int
+    let nextValue: Int
+    var body: some View {
+        HStack {
+            Text(label).minecraftFont(size: 18)
+            Text("\(value)").minecraftFont(size: 18)
+            Image(systemName: "arrow.right").foregroundColor(.gray)
+            Text("\(nextValue)").minecraftFont(size: 18, color: .green)
+        }
+    }
+}
+
+struct NavButtonView: View {
+    let imageName: String
+    var showNotification: Bool = false
+    let action: () -> Void
+    
+    var body: some View {
+        Button(action: action) {
+            ZStack(alignment: .topTrailing) {
+                Image(imageName)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 350)
+
+                if showNotification {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 30, height: 30)
+                        .overlay(
+                            Text("!")
+                                .minecraftFont(size: 20)
+                                .foregroundColor(.white)
+                        )
+                        .shadow(radius: 5)
+                        .offset(x: -20, y: 10)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Main Screen Views
+struct MainMenuView: View {
+    @ObservedObject var gameStateManager: GameStateManager
+    @State private var isAnimating = false
+    @State private var characterJumped = false
+    var body: some View {
+        ZStack {
+            Image("background_0").resizable().aspectRatio(contentMode: .fill).edgesIgnoringSafeArea(.all).scaleEffect(1.5).offset(y: isAnimating ? -10 : 10)
+            ShootingStarLayer().edgesIgnoringSafeArea(.all)
+            
+            Image("background_1").resizable().aspectRatio(contentMode: .fit).frame(width: 350, height: 600).offset(y: isAnimating ? 5 : -5)
+            VStack {
+                Spacer()
+                ZStack {
+                    Image("background_2").resizable().aspectRatio(contentMode: .fit).frame(width: 380)
+                    if let mainChar = gameStateManager.playerProfile.mainCharacter {
+                        CharacterView(characterAssetName: mainChar.characterId, isAnimating: $isAnimating)
+                            .offset(y: -140).offset(y: characterJumped ? -800 : 0)
+                    }
+                }
+            }.frame(width: 350, height: 600)
+            
+            VStack {
+                Image("main_logo").resizable().scaledToFit().frame(width: 300).shadow(radius: 10)
+                    .padding(.top, 60)
+                Spacer()
+                Button(action: {
+                    withAnimation(.easeIn(duration: 0.5)) { characterJumped = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                        withAnimation { gameStateManager.navigateTo(.levelSelect) }
+                    }
+                }) { Image("start_button").resizable().scaledToFit().frame(width: 250) }
+                
+                HStack(spacing: 20) {
+                    Button(action: { gameStateManager.navigateTo(.army) }) {
+                        Image("army_button").resizable().scaledToFit().frame(width: 120)
+                    }
+                    Button(action: { gameStateManager.navigateTo(.store) }) {
+                        Image("crate_button").resizable().scaledToFit().frame(width: 120)
+                    }
+                }.padding(.top, 10)
+
+            }.padding(.bottom, 40)
+            
+        }.onAppear { withAnimation(Animation.easeInOut(duration: 4.0).repeatForever(autoreverses: true)) { isAnimating = true } }
+    }
+}
+
+struct LevelNodeView: View {
+    let level: Level
+    @ObservedObject var gameStateManager: GameStateManager
+    
+    @State private var isFloating = false
+    @State private var animatedStars = 0
+    @State private var platformTiltAngle: Double = 0
+    @State private var characterLanded = false
+    
+    private var playerChar: CharacterInstance { gameStateManager.playerProfile.mainCharacter! }
+    private var enemyInstance: EnemyInstance { EnemyInstance(id: level.enemyIds.first!, levelId: level.id) }
+    
+    var body: some View {
+        Button(action: {
+            if level.isUnlocked {
+                gameStateManager.navigateTo(.battle(level: level))
+            }
+        }) {
+            ZStack {
+                VStack {
+                    Spacer()
+                    ZStack {
+                        Image(level.platformAssetName)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 350)
+                    }
+                    .rotationEffect(.degrees(platformTiltAngle))
+                    .offset(y: isFloating ? -10 : 10)
+                    .offset(y: level.platformAssetName == "level_3" ? 40 : 0)
+                }
+                
+                VStack {
+                    StarRatingView(rating: $animatedStars)
+                        .padding(.top, 100)
+
+                    DifficultyPill(difficulty: level.difficulty)
+                    Text("Level \(level.id)").minecraftFont()
+
+                    Spacer()
+
+                    HStack(spacing: 10) {
+                        Image(playerChar.characterId)
+                            .resizable().scaledToFit().frame(width: 120)
+                            .offset(y: characterLanded ? 0 : -400)
+                        
+                        Image(enemyInstance.id)
+                            .resizable().scaledToFit().frame(height: 130)
+                    }
+                    
+                    Spacer()
+                    
+                    Spacer().frame(height: 150)
+                }
+            }
+        }
+        .buttonStyle(PlainButtonStyle())
+        .onAppear {
+            withAnimation(Animation.easeInOut(duration: 3.0).repeatForever(autoreverses: true)) { isFloating = true }
+            animateStars(to: level.starRating)
+            if gameStateManager.playerProfile.currentLevelId == level.id {
+                triggerLandingAnimation()
+            }
+        }
+        .onChange(of: gameStateManager.playerProfile.currentLevelId) { newId in
+            if newId == level.id {
+                characterLanded = false
+                triggerLandingAnimation()
+            }
+        }
+    }
+    
+    private func triggerLandingAnimation() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            withAnimation(.interpolatingSpring(mass: 1, stiffness: 100, damping: 12, initialVelocity: 0)) {
+                characterLanded = true
+            }
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.3).delay(0.2)) {
+                platformTiltAngle = -7
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                withAnimation(.spring()) {
+                    platformTiltAngle = 0
+                }
+            }
+        }
+    }
+    
+    private func animateStars(to newRating: Int) {
+        animatedStars = 0
+        for i in 0..<newRating {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.3) {
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.5)) { animatedStars += 1 }
+            }
+        }
+    }
+}
+
+struct LevelSelectView: View {
+    @ObservedObject var gameStateManager: GameStateManager
+    @State private var currentLevelSelection: Int
+
+    init(gameStateManager: GameStateManager) {
+        self.gameStateManager = gameStateManager
+        self._currentLevelSelection = State(initialValue: gameStateManager.playerProfile.currentLevelId)
+    }
+
+    var body: some View {
+        let showUpgradeNotif = gameStateManager.shouldShowUpgradeNotification
+        let showCrateNotif = gameStateManager.shouldShowCrateTutorial
+        
+        ZStack {
+            Image("battle_background")
+                .resizable()
+                .scaledToFill()
+                .edgesIgnoringSafeArea(.all)
+
+            VStack(spacing: 0) {
+                TabView {
+                    NavButtonView(imageName: "army_button", showNotification: showUpgradeNotif, action: { gameStateManager.navigateTo(.army) })
+                    NavButtonView(imageName: "crate_button", showNotification: showCrateNotif, action: { gameStateManager.navigateTo(.store) })
+                }
+                .frame(height: 150)
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                .padding(.top, 60)
+
+                TabView(selection: $currentLevelSelection) {
+                    ForEach(gameStateManager.levels) { level in
+                        LevelNodeView(level: level, gameStateManager: gameStateManager)
+                            .tag(level.id)
+                            .grayscale(level.isUnlocked ? 0 : 1.0)
+                            .opacity(level.isUnlocked ? 1.0 : 0.6)
+                            .allowsHitTesting(level.isUnlocked)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .always))
+                .padding(.bottom, 60)
+            }
+            
+            VStack {
+                HStack {
+                    Spacer()
+                    PaperMoneyView(money: gameStateManager.playerProfile.paperMoney)
+                    Spacer()
+                }
+                .padding(.top)
+                Spacer()
+            }
+            
+            BottomBackButtonView {
+                gameStateManager.goBack()
+            }
+        }
+        .onChange(of: gameStateManager.playerProfile.currentLevelId) { newId in
+            withAnimation {
+                currentLevelSelection = newId
+            }
+        }
+    }
+}
+
+struct StoreView: View {
+    @ObservedObject var gameStateManager: GameStateManager
+    let crates = [
+        Crate(name: "Common Crate", imageName: "crate_1", cost: 250, tier: 1),
+        Crate(name: "Rare Crate", imageName: "crate_2", cost: 1000, tier: 2),
+        Crate(name: "Epic Crate", imageName: "crate_3", cost: 3000, tier: 3)
+    ]
+    
+    var body: some View {
+        ZStack(alignment: .top) {
+            Image("crate_background").resizable().scaledToFill().edgesIgnoringSafeArea(.all)
+            
+            VStack(spacing: 0) {
+                Text("Crate Store").minecraftFont()
+                    .padding(.top, 80)
+                    .padding(.bottom)
+
+                TabView {
+                    ForEach(crates) { crate in
+                        VStack(spacing: 20) {
+                            Spacer()
+                            Image(crate.imageName).resizable().scaledToFit().frame(height: 200)
+                            Text(crate.name).minecraftFont()
+                            Text("Contains 1 Character").minecraftFont(size: 20)
+                            Spacer().frame(height: 20)
+                            Button(action: {
+                                if gameStateManager.playerProfile.paperMoney >= crate.cost {
+                                    gameStateManager.playerProfile.paperMoney -= crate.cost
+                                    gameStateManager.navigateTo(.packOpening(crate: crate))
+                                }
+                            }) {
+                                HStack {
+                                    Text("\(crate.cost)").minecraftFont(size: 22)
+                                    Image("paper_money").resizable().scaledToFit().frame(height: 25)
+                                }
+                                .padding(.horizontal, 30).padding(.vertical, 15)
+                                .background(gameStateManager.playerProfile.paperMoney >= crate.cost ? Color.yellow : Color.gray)
+                                .foregroundColor(.black).cornerRadius(15)
+                            }
+                            .disabled(gameStateManager.playerProfile.paperMoney < crate.cost)
+                            Spacer()
+                        }
+                        .padding(.bottom, 80)
+                    }
+                }
+                .tabViewStyle(.page)
+            }
+            
+            VStack {
+                HStack {
+                    Spacer()
+                    PaperMoneyView(money: gameStateManager.playerProfile.paperMoney)
+                    Spacer()
+                }
+                .padding(.top)
+                Spacer()
+            }
+            
+            BottomBackButtonView {
+                gameStateManager.goBack()
+            }
+        }
+    }
+}
+
+struct ProfileView: View {
+    @ObservedObject var gameStateManager: GameStateManager
+    private let statColumns = [GridItem(.adaptive(minimum: 150))]
+
+    var body: some View {
+        ZStack {
+            Image("battle_background")
+                .resizable()
+                .scaledToFill()
+                .edgesIgnoringSafeArea(.all)
+
+            VStack(spacing: 0) {
+                HStack {
+                    Button(action: { gameStateManager.goBack() }) {
+                        Image("back_button").resizable().scaledToFit().frame(width: 90)
+                    }
+                    Spacer()
+                    Text("Your Profile").minecraftFont()
+                    Spacer()
+                    Image("back_button").resizable().scaledToFit().frame(width: 90).opacity(0)
+                }
+                .padding(.horizontal)
+                .padding(.top, 50)
+                .padding(.bottom, 10)
+                
+                ScrollView {
+                    VStack(spacing: 24) {
+                        VStack {
+                            Image(gameStateManager.playerProfile.profileImageName)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 120, height: 120)
+                                .clipShape(Circle())
+                                .overlay(Circle().stroke(Color.yellow, lineWidth: 4))
+                                .shadow(radius: 10)
+                            
+                            Text(gameStateManager.playerProfile.displayName)
+                                .minecraftFont(size: 36)
+                            
+                            Text(gameStateManager.playerProfile.bio)
+                                .font(.custom("AmericanTypewriter", size: 18))
+                                .foregroundColor(.white.opacity(0.8))
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal)
+                        }
+                        .padding()
+                        .frame(maxWidth: .infinity)
+                        .background(.black.opacity(0.4))
+                        .cornerRadius(20)
+                        
+                        if let mainChar = gameStateManager.playerProfile.mainCharacter {
+                            VStack(spacing: 10) {
+                                Text("Main Character")
+                                    .minecraftFont(size: 24)
+                                
+                                HStack {
+                                    Image(mainChar.characterId)
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(height: 100)
+                                    
+                                    VStack(alignment: .leading) {
+                                        Text(mainChar.name)
+                                            .minecraftFont(size: 22)
+                                        Text("Lvl \(mainChar.level)")
+                                            .minecraftFont(size: 18, color: .yellow)
+                                        StatDisplay(character: mainChar)
+                                    }
+                                }
+                            }
+                            .padding()
+                            .frame(maxWidth: .infinity)
+                            .background(.black.opacity(0.4))
+                            .cornerRadius(20)
+                        }
+                        
+                        VStack {
+                            Text("Hero Stats")
+                                .minecraftFont(size: 24)
+                            
+                            LazyVGrid(columns: statColumns, spacing: 16) {
+                                StatPill(title: "Paper Money", value: "\(gameStateManager.playerProfile.paperMoney)", imageName: "paper_money")
+                                StatPill(title: "Levels Won", value: "\(gameStateManager.levels.filter { $0.starRating > 0 }.count)", systemImageName: "star.fill")
+                                StatPill(title: "Characters", value: "\(gameStateManager.playerProfile.characterCollection.count)", systemImageName: "person.3.fill")
+                                StatPill(title: "Current Level", value: "\(gameStateManager.playerProfile.currentLevelId)", systemImageName: "flag.fill")
+                            }
+                        }
+                        .padding()
+                        .frame(maxWidth: .infinity)
+                        .background(.black.opacity(0.4))
+                        .cornerRadius(20)
+
+                    }
+                    .padding(.horizontal)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Army Carousel Screen
+struct XPBarView: View {
+    let currentXP: Int
+    let maxXP: Int
+    
+    private var progress: CGFloat {
+        return maxXP > 0 ? CGFloat(currentXP) / CGFloat(maxXP) : 0
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("XP to Next Level")
+                .minecraftFont(size: 14)
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.black.opacity(0.5))
+
+                GeometryReader { geometry in
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(
+                            LinearGradient(
+                                gradient: Gradient(colors: [Color(red: 0.6, green: 0, blue: 1), .purple]),
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: geometry.size.width * progress)
+                        .animation(.easeInOut, value: progress)
+                }
+
+                Text("\(currentXP) / \(maxXP)")
+                    .minecraftFont(size: 14)
+            }
+            .frame(height: 25)
+        }
+    }
+}
+
+struct CharacterPageView: View {
+    @ObservedObject var gameStateManager: GameStateManager
+    let character: CharacterInstance
+
+    var body: some View {
+        VStack(spacing: 15) {
+            Spacer()
+            
+            Text(character.name)
+                .minecraftFont(size: 40)
+            
+            Text("Level \(character.level)")
+                .minecraftFont(size: 24, color: .yellow)
+                .padding(.bottom, 10)
+
+            Image(character.characterId)
+                .resizable()
+                .scaledToFit()
+                .frame(maxHeight: 250)
+                .shadow(radius: 10)
+
+            VStack {
+                StatBar(label: "HP", value: character.health, nextValue: character.health + character.base.healthGrowth)
+                StatBar(label: "DMG", value: character.attack, nextValue: character.attack + character.base.attackGrowth)
+            }
+            .padding()
+            .background(Material.regular)
+            .cornerRadius(15)
+
+            VStack(spacing: 15) {
+                xpAndUpgradeView(for: character)
+                setAsMainButton(for: character)
+            }
+            .padding(.horizontal)
+
+            Button(action: { gameStateManager.goBack() }) {
+                Image("back_button")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 200)
+            }
+            .padding(.top, 5)
+
+            Spacer()
+        }
+        .padding(.horizontal, 20)
+    }
+
+    @ViewBuilder
+    private func xpAndUpgradeView(for character: CharacterInstance) -> some View {
+        if character.canUpgrade {
+            let cost = gameStateManager.upgradeCost(for: character)
+            let canAfford = gameStateManager.playerProfile.paperMoney >= cost
+            
+            Button(action: {
+                gameStateManager.performUpgrade(for: character.id)
+            }) {
+                HStack {
+                    Text("Upgrade for \(cost)")
+                    Image("paper_money").resizable().scaledToFit().frame(height: 20)
+                }
+                .minecraftFont(size: 18, color: .white)
+                .frame(maxWidth: .infinity)
+                .padding(10)
+                .background(canAfford ? Color.green : Color.gray)
+                .cornerRadius(8)
+            }
+            .disabled(!canAfford)
+            .shadow(color: canAfford ? .green : .clear, radius: 5)
+            
+        } else {
+            XPBarView(currentXP: character.xp, maxXP: character.maxXp)
+        }
+    }
+    
+    @ViewBuilder
+    private func setAsMainButton(for character: CharacterInstance) -> some View {
+        let isMainCharacter = gameStateManager.playerProfile.mainCharacterInstanceId == character.id
+        
+        Button(action: { gameStateManager.playerProfile.mainCharacterInstanceId = character.id }) {
+            Label {
+                Text("Set as Main")
+            } icon: {
+                Image(systemName: "star.fill")
+            }
+            .minecraftFont(size: 22, color: isMainCharacter ? .yellow : .white)
+            .frame(maxWidth: .infinity)
+            .padding(15)
+        }
+        .background(Color.clear)
+        .cornerRadius(8)
+        .disabled(isMainCharacter)
+    }
+}
+
+struct ArmyView: View {
+    @ObservedObject var gameStateManager: GameStateManager
+    @State private var selectedCharacterId: UUID
+
+    init(gameStateManager: GameStateManager) {
+        self.gameStateManager = gameStateManager
+        _selectedCharacterId = State(initialValue: gameStateManager.playerProfile.mainCharacterInstanceId)
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            Image("army_background")
+                .resizable()
+                .scaledToFill()
+                .edgesIgnoringSafeArea(.all)
+            
+            Color.black.opacity(0.3).edgesIgnoringSafeArea(.all)
+            
+            VStack(spacing: 0) {
+                HStack {
+                    Spacer()
+                    Text("My Army").minecraftFont(size: 32)
+                    Spacer()
+                }
+                .padding(.top, 50)
+                
+                TabView(selection: $selectedCharacterId) {
+                    ForEach(gameStateManager.playerProfile.characterCollection) { character in
+                        CharacterPageView(gameStateManager: gameStateManager, character: character)
+                            .tag(character.id)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .always))
+            }
+        }
+        .ignoresSafeArea(edges: .bottom)
+    }
+}
+
+// MARK: - Crate Opening Screen
+enum CrateAnimationStep {
+    case initial, shaking, revealing, finished
+}
+
+struct CrateOpeningParticles: View {
+    @State private var isAnimating: Bool = false
+    var body: some View {
+        ZStack {
+            ForEach(0..<25) { _ in
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            gradient: Gradient(colors: [.yellow, .orange, .yellow.opacity(0)]),
+                            startPoint: .center,
+                            endPoint: .bottom
+                        )
+                    )
+                    .frame(width: .random(in: 10...50), height: .random(in: 10...50))
+                    .scaleEffect(isAnimating ? CGFloat.random(in: 1.5...3.0) : 1)
+                    .offset(x: isAnimating ? .random(in: -250...250) : 0, y: isAnimating ? .random(in: -250...250) : 0)
+                    .opacity(isAnimating ? 0 : 1)
+            }
+        }
+        .onAppear {
+            withAnimation(Animation.spring(response: 0.5, dampingFraction: 0.5).delay(0.1)) {
+                isAnimating = true
+            }
+        }
+    }
+}
+
+struct PackOpeningView: View {
+    @ObservedObject var gameStateManager: GameStateManager
+    let crate: Crate
+
+    @State private var animationStep: CrateAnimationStep = .initial
+    @State private var revealedCharacter: GameCharacter? = nil
+    @State private var isDuplicate: Bool = false
+    @State private var rotation: Double = 0
+    @State private var scale: CGFloat = 1.0
+
+    var body: some View {
+        ZStack {
+            Image("crate_background").resizable().scaledToFill().edgesIgnoringSafeArea(.all).blur(radius: 5)
+            Color.black.opacity(0.4).edgesIgnoringSafeArea(.all)
+            
+            VStack(spacing: 30) {
+                if let character = revealedCharacter, animationStep == .revealing || animationStep == .finished {
+                    // Character Reveal Area
+                    ZStack {
+                        if animationStep == .revealing {
+                            CrateOpeningParticles()
+                            RadialGradient(colors: [.yellow.opacity(0.8), .yellow.opacity(0)], center: .center, startRadius: 50, endRadius: 300)
+                                .scaleEffect(scale * 1.5)
+                        }
+                        
+                        Image(character.id)
+                            .resizable().scaledToFit().frame(height: 300)
+                            .scaleEffect(scale)
+                            .shadow(color: .yellow, radius: 10)
+                    }
+                    
+                    if animationStep == .finished {
+                        Text(character.name).minecraftFont(size: 40)
+                        
+                        if isDuplicate {
+                            Text("DUPLICATE!\n+\(character.recycleXpValue) XP").minecraftFont(size: 24, color: .green)
+                                .multilineTextAlignment(.center)
+                        } else {
+                             Text("NEW CHARACTER!").minecraftFont(size: 24, color: .cyan)
+                        }
+
+                        Button(action: { gameStateManager.goBack() }) {
+                            Text("Continue")
+                                .minecraftFont(size: 28)
+                                .padding()
+                                .background(Color.blue)
+                                .cornerRadius(10)
+                        }
+                    }
+                    
+                } else {
+                    // Crate Area
+                    Image(crate.imageName)
+                        .resizable().scaledToFit().frame(height: 250)
+                        .rotationEffect(.degrees(rotation))
+                        .scaleEffect(scale)
+                    
+                    if animationStep == .initial {
+                        Button(action: openCrate) {
+                            Text("Tap to Open")
+                                .minecraftFont(size: 28)
+                                .padding()
+                                .background(Color.green)
+                                .cornerRadius(10)
+                        }
+                    }
+                }
+            }
+            .padding()
+        }
+    }
+
+    func openCrate() {
+        let characterPool = GameDB.allCharacters.values.filter { $0.sourceCrate == crate.tier }
+        guard let chosenCharacter = characterPool.randomElement() else {
+            gameStateManager.goBack()
+            return
+        }
+        
+        self.revealedCharacter = chosenCharacter
+
+        if let existingChar = gameStateManager.playerProfile.characterCollection.first(where: { $0.characterId == chosenCharacter.id }) {
+            self.isDuplicate = true
+            gameStateManager.addXpToCharacter(instanceId: existingChar.id, amount: chosenCharacter.recycleXpValue)
+        } else {
+            self.isDuplicate = false
+            let newInstance = CharacterInstance(characterId: chosenCharacter.id)
+            gameStateManager.playerProfile.characterCollection.append(newInstance)
+        }
+
+        withAnimation { animationStep = .shaking }
+        withAnimation(Animation.linear(duration: 0.1).repeatCount(10, autoreverses: true)) {
+            rotation = 5
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            rotation = 0
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.5)) {
+                animationStep = .revealing
+                scale = 0
+            }
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                scale = 0
+                withAnimation(.spring(response: 0.6, dampingFraction: 0.6)) {
+                    scale = 1.1
+                }
+                
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    withAnimation(.spring()) {
+                        scale = 1.0
+                    }
+                }
+            }
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            withAnimation {
+                animationStep = .finished
+            }
+        }
+    }
+}
+
+struct PostLevelVictoryView: View {
+    @ObservedObject var gameStateManager: GameStateManager
+    let moneyGained: Int
+    let stars: Int
+    var body: some View {
+        ZStack {
+            Image("battle_background")
+                .resizable()
+                .scaledToFill()
+                .edgesIgnoringSafeArea(.all)
+            
+            Color.black.opacity(0.4).edgesIgnoringSafeArea(.all)
+
+            VStack {
+                Spacer()
+                VStack(spacing: 30) {
+                     Text("Victory!")
+                        .minecraftFont(size: 60, color: .yellow)
+                    
+                     VStack {
+                         Text("You earned:")
+                             .minecraftFont(size: 24)
+                         HStack {
+                             Text("\(moneyGained)")
+                                 .minecraftFont(size: 32, color: .green)
+                             Image("paper_money")
+                                 .resizable().scaledToFit().frame(height: 40)
+                         }
+                     }
+
+                     StarRatingView(rating: .constant(stars))
+                }
+                .padding(40)
+                .background(Material.regular)
+                .cornerRadius(20)
+                .shadow(radius: 10)
+                Spacer()
+            }
+            
+            BottomBackButtonView { gameStateManager.returnToLevelSelect() }
+        }
+    }
+}
+
+// MARK: - Battle System
+struct BattleView: View {
+    @ObservedObject var gameStateManager: GameStateManager
+    let level: Level
+    
+    // Helper struct for attack outcomes
+    private struct AttackResult {
+        let damage: Int
+        let didMiss: Bool
+        let didCrit: Bool
+        let didStun: Bool
+    }
+    
+    // Battle State
+    @State private var playerHealth: Int
+    @State private var enemyHealth: Int
+    @State private var isPlayerTurn: Bool = true
+    @State private var damageNumbers: [DamageText] = []
+    @State private var battleTimer = Timer.publish(every: 1.75, on: .main, in: .common).autoconnect()
+    @State private var isBattleOver = false
+
+    // Animation Triggers
+    @State private var showPlayerAttack = false
+    @State private var showEnemyAttack = false
+    
+    private var playerChar: CharacterInstance { gameStateManager.playerProfile.mainCharacter! }
+    private var enemyInstance: EnemyInstance { EnemyInstance(id: level.enemyIds.first!, levelId: level.id) }
+    
+    init(gameStateManager: GameStateManager, level: Level) {
+        self.gameStateManager = gameStateManager
+        self.level = level
+        let player = gameStateManager.playerProfile.mainCharacter!
+        _playerHealth = State(initialValue: player.health)
+        
+        let enemy = EnemyInstance(id: level.enemyIds.first!, levelId: level.id)
+        _enemyHealth = State(initialValue: enemy.health)
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                Image("battle_background")
+                    .resizable()
+                    .scaledToFill()
+                    .edgesIgnoringSafeArea(.all)
+                
+                VStack {
+                    Spacer()
+                    Image("battle_background2")
+                        .resizable()
+                        .scaledToFit()
+                        .scaleEffect(1.0) // Resized to 1/4 of 10.0
+                        .offset(y: 25)
+                }
+                
+                HStack(alignment: .bottom, spacing: 40) {
+                    VStack {
+                        Image(playerChar.characterId)
+                            .resizable().scaledToFit().frame(width: 150)
+                            .offset(x: showPlayerAttack ? 50 : 0)
+                        Text(playerChar.name).minecraftFont(size: 20)
+                        HealthBar(currentHealth: playerHealth, maxHealth: playerChar.health)
+                    }
+                    .overlay(showPlayerAttack ? AttackParticleEffect().offset(x: 50) : nil)
+                    
+                    VStack {
+                        Image(enemyInstance.id)
+                            .resizable().scaledToFit().frame(width: 150)
+                            .offset(x: showEnemyAttack ? -50 : 0)
+                        Text(enemyInstance.name).minecraftFont(size: 20)
+                        HealthBar(currentHealth: enemyHealth, maxHealth: enemyInstance.health)
+                    }
+                     .overlay(showEnemyAttack ? AttackParticleEffect().offset(x: -50) : nil)
+                }
+                .position(x: geometry.size.width / 2, y: geometry.size.height * 0.75)
+                
+                ZStack {
+                    ForEach(damageNumbers) { item in
+                        DamageTextView(item: item)
+                            .position(
+                                x: item.isPlayerDamage ? geometry.size.width * 0.3 : geometry.size.width * 0.7,
+                                y: geometry.size.height * 0.6
+                            )
+                    }
+                }
+            }
+        }
+        .onAppear(perform: setupBattle)
+        .onReceive(battleTimer) { _ in
+            guard !isBattleOver else {
+                battleTimer.upstream.connect().cancel()
+                return
+            }
+            
+            if isPlayerTurn {
+                playerAttack()
+            } else {
+                enemyTurn()
+            }
+        }
+        .onDisappear {
+            battleTimer.upstream.connect().cancel()
+        }
+    }
+    
+    func setupBattle() {
+        self.playerHealth = playerChar.health
+        self.enemyHealth = enemyInstance.health
+    }
+
+    private func calculateAttackOutcome(attackPower: Int) -> AttackResult {
+        if Int.random(in: 1...100) <= 10 {
+            return AttackResult(damage: 0, didMiss: true, didCrit: false, didStun: false)
+        }
+
+        var finalDamage = attackPower
+        var didCrit = false
+        if Int.random(in: 1...100) <= 1 {
+            didCrit = true
+            finalDamage *= 3
+        }
+
+        let didStun = Int.random(in: 1...100) <= 5
+
+        return AttackResult(damage: finalDamage, didMiss: false, didCrit: didCrit, didStun: didStun)
+    }
+
+    func playerAttack() {
+        withAnimation(.easeInOut(duration: 0.2)) { showPlayerAttack = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            withAnimation(.easeInOut(duration: 0.2)) { showPlayerAttack = false }
+        }
+        
+        let result = calculateAttackOutcome(attackPower: playerChar.attack)
+
+        if result.didMiss {
+            damageNumbers.append(DamageText(text: "Miss!", color: .gray, isPlayerDamage: false))
+            isPlayerTurn = false
+            return
+        }
+        
+        enemyHealth -= result.damage
+        
+        if result.didCrit {
+            damageNumbers.append(DamageText(text: "CRITICAL!\n-\(result.damage)", color: .orange, isPlayerDamage: false))
+        } else {
+            damageNumbers.append(DamageText(text: "-\(result.damage)", color: .red, isPlayerDamage: false))
+        }
+
+        if enemyHealth <= 0 {
+            enemyHealth = 0
+            isBattleOver = true
+            battleTimer.upstream.connect().cancel()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                let healthPercentage = Double(playerHealth) / Double(playerChar.health)
+                let stars = healthPercentage > 0.75 ? 3 : (healthPercentage > 0.4 ? 2 : 1)
+                let moneyGained = gameStateManager.completeLevel(id: level.id, stars: stars)
+                gameStateManager.navigateTo(.postLevelVictory(moneyGained: moneyGained, stars: stars))
+            }
+            return
+        }
+        
+        if result.didStun {
+            damageNumbers.append(DamageText(text: "Stunned!", color: .cyan, isPlayerDamage: false))
+        } else {
+            isPlayerTurn = false
+        }
+    }
+    
+    func enemyTurn() {
+        withAnimation(.easeInOut(duration: 0.2)) { showEnemyAttack = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            withAnimation(.easeInOut(duration: 0.2)) { showEnemyAttack = false }
+        }
+        
+        let result = calculateAttackOutcome(attackPower: enemyInstance.attack)
+
+        if result.didMiss {
+            damageNumbers.append(DamageText(text: "Miss!", color: .gray, isPlayerDamage: true))
+            isPlayerTurn = true
+            return
+        }
+        
+        playerHealth -= result.damage
+        
+        if result.didCrit {
+            damageNumbers.append(DamageText(text: "CRITICAL!\n-\(result.damage)", color: .orange, isPlayerDamage: true))
+        } else {
+            damageNumbers.append(DamageText(text: "-\(result.damage)", color: .yellow, isPlayerDamage: true))
+        }
+
+        if playerHealth <= 0 {
+            playerHealth = 0
+            isBattleOver = true
+            battleTimer.upstream.connect().cancel()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                gameStateManager.goBack()
+            }
+            return
+        }
+        
+        if result.didStun {
+            damageNumbers.append(DamageText(text: "Stunned!", color: .cyan, isPlayerDamage: true))
+        } else {
+            isPlayerTurn = true
+        }
+    }
+}
